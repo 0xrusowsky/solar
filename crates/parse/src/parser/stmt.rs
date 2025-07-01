@@ -86,16 +86,35 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let expr = {
             let expr = self.parse_expr()?;
             self.expect(TokenKind::CloseDelim(Delimiter::Parenthesis))?;
-            Spanned { span: expr_lo.to(self.prev_token.span), data: expr }
+            let next = self.look_ahead(1);
+            let span = if matches!(next.kind, TokenKind::CloseDelim(Delimiter::Brace)) {
+                expr_lo.to(next.span)
+            } else {
+                expr_lo.to(self.prev_token.span)
+            };
+            Spanned { span, data: expr }
         };
         let cond_lo = self.prev_token.span;
         let cond_stmt = {
             let true_stmt = self.parse_stmt()?;
-            Spanned { span: cond_lo.to(self.prev_token.span), data: self.alloc(true_stmt) }
+            let next = self.look_ahead(1);
+            let span = if matches!(next.kind, TokenKind::CloseDelim(Delimiter::Brace)) {
+                cond_lo.to(next.span)
+            } else {
+                cond_lo.to(self.prev_token.span)
+            };
+            Spanned { span, data: self.alloc(true_stmt) }
         };
         let else_stmt = if self.eat_keyword(kw::Else) {
             let else_lo = self.prev_token.span;
-            Some(Spanned { span: else_lo.to(self.prev_token.span), data: self.parse_stmt_boxed()? })
+            let stmt = self.parse_stmt_boxed()?;
+            let next = self.look_ahead(1);
+            let span = if matches!(next.kind, TokenKind::CloseDelim(Delimiter::Brace)) {
+                else_lo.to(next.span)
+            } else {
+                else_lo.to(self.prev_token.span)
+            };
+            Some(Spanned { span, data: stmt })
         } else {
             None
         };
