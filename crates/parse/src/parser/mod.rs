@@ -1,4 +1,5 @@
 use crate::{Lexer, PErr, PResult};
+use memchr::memchr;
 use smallvec::SmallVec;
 use solar_ast::{
     self as ast, AstPath, Box, BoxSlice, DocComment, DocComments,
@@ -905,21 +906,24 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         for comment in comments {
             // Line comments: '///', Block comments: '/**'.
             const PREFIX_BYTES: u32 = 3;
-            let mut acc_bytes = 0u32;
+            let content = comment.symbol.as_str();
+            let (bytes, mut pos) = (content.as_bytes(), 0);
 
-            for line in comment.symbol.as_str().lines() {
-                if let Some(tag_offset) = line.find('@') {
+            while pos < bytes.len() {
+                let line_end =
+                    memchr(b'\n', &bytes[pos..]).map(|offset| pos + offset).unwrap_or(bytes.len());
+
+                if let Some(tag_offset) = memchr(b'@', &bytes[pos..line_end]) {
                     has_tags = true;
-                    let tag_line = &line[tag_offset + 1..];
+                    let tag_start = pos + tag_offset + 1;
                     flush_item(&mut items, &mut kind, &mut span);
 
-                    let (tag, rest) =
-                        tag_line.split_once(char::is_whitespace).unwrap_or((tag_line, ""));
+                    let (tag, rest_start) = split_once_ws(content, bytes, tag_start, line_end);
 
                     // Calculate span: from '@' to end of tag name.
-                    let tag_hi = comment.span.lo().0 + PREFIX_BYTES + acc_bytes + tag_offset as u32;
-                    let tag_lo = tag_hi + tag.len() as u32 + 1; // +1 for '@'
-                    span = Some(Span::new(BytePos(tag_hi), BytePos(tag_lo)));
+                    let tag_lo = comment.span.lo().0 + PREFIX_BYTES + (pos + tag_offset) as u32;
+                    let tag_hi = tag_lo + tag.len() as u32 + 1; // +1 for '@'
+                    span = Some(Span::new(BytePos(tag_lo), BytePos(tag_hi)));
 
                     let tag_symbol = Symbol::intern(tag);
                     kind = Some(match tag_symbol {
@@ -928,8 +932,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                         sym::notice => ast::NatSpecKind::Notice,
                         sym::dev => ast::NatSpecKind::Dev,
                         sym::param | kw::Return | sym::inheritdoc => {
-                            let (name, _) =
-                                rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+                            let (name, _) = split_once_ws(content, bytes, rest_start, line_end);
                             let ident = Ident::new(Symbol::intern(name), comment.span);
                             match tag_symbol {
                                 sym::param => ast::NatSpecKind::Param { tag: ident },
@@ -953,14 +956,22 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                                     .span(comment.span)
                                     .emit();
                                 }
-                                acc_bytes += line.len() as u32 + 1; // +1 for newline
+                                pos = if line_end < bytes.len() {
+                                    line_end + 1 // +1 to skip '\n'
+                                } else {
+                                    bytes.len()
+                                };
                                 continue;
                             }
                         }
                     });
                 }
 
-                acc_bytes += line.len() as u32 + 1; // +1 for newline
+                pos = if line_end < bytes.len() {
+                    line_end + 1 // +1 to skip '\n'
+                } else {
+                    bytes.len()
+                };
             }
         }
         flush_item(&mut items, &mut kind, &mut span);
@@ -1108,6 +1119,31 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     #[track_caller]
     fn expected_ident_found_err(&mut self) -> PErr<'sess> {
         self.expected_ident_found(false).unwrap_err()
+    }
+}
+
+/// Splits a string slice at the first whitespace character using the `memchr` crate.
+/// Returns the content up to the whitespace and the position of the first following non-blank char.
+#[inline]
+fn split_once_ws<'a>(
+    content: &'a str,
+    bytes: &'a [u8],
+    start: usize,
+    end: usize,
+) -> (&'a str, usize) {
+    let ws_pos = memchr::memchr3(b' ', b'\t', b'\r', &bytes[start..end])
+        .map(|offset| start + offset)
+        .unwrap_or(end);
+
+    if ws_pos < end {
+        let rest_start = bytes[ws_pos..end]
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'))
+            .map(|offset| ws_pos + offset)
+            .unwrap_or(end);
+        (&content[start..ws_pos], rest_start)
+    } else {
+        (&content[start..ws_pos], end)
     }
 }
 
